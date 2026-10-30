@@ -4,6 +4,11 @@
 #### Source: 
 https://phorion.io/blog/offical-claude-code-vsx-compromise/
 
+#### Supported OS (Python3 Required):
+  - Windows
+  - Linux
+  - MacOS
+
 #### Read-Only Checks:
   - Installed / cached extension builds of anthropic.claude-code-2.1.313
   - SHA-256 of every installed anthropic.claude-code extension.js
