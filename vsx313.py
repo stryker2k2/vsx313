@@ -338,15 +338,38 @@ def check_cron():
         report(OK, name, "no .smt / C2 entries" + ("" if is_admin() else " (current user only)"))
 
 
-def check_launchd():
+def check_launchd(homes):
     if SYSTEM != "Darwin":
         return
+    import plistlib
     name = "launchd"
-    rc, out = run(["launchctl", "list"])
-    if rc == 0 and "com.apple.sysmond" in out:
-        report(HIT, name, "LaunchAgent com.apple.sysmond is loaded")
-    else:
-        report(OK, name, "com.apple.sysmond not loaded")
+    hits_before = len(results)
+    for home in homes:
+        # Apple ships nothing in per-user LaunchAgents, so a com.apple.* label there is a disguise.
+        for plist in sorted((home / "Library" / "LaunchAgents").glob("*.plist")):
+            try:
+                with open(plist, "rb") as f:
+                    data = plistlib.load(f)
+            except (OSError, plistlib.InvalidFileException, ValueError) as e:
+                report(INFO, name, f"cannot parse {plist}: {e}")
+                continue
+            label = str(data.get("Label", ""))
+            argv = " ".join(map(str, [data.get("Program", "")] + list(data.get("ProgramArguments", []))))
+            if ".config/.smt" in argv or C2_IP in argv:
+                report(HIT, name, f"{plist} (label {label}) runs the payload: {argv.strip()}")
+            elif label.startswith("com.apple."):
+                report(WARN, name, f"{plist} uses Apple label '{label}' in a user LaunchAgent: {argv.strip()}")
+            elif re.search(r"/bin/(ba|z)?sh\b.*/\.[^/\s]+", argv):
+                report(WARN, name, f"{plist} (label {label}) runs a shell on a hidden file: {argv.strip()}")
+
+        # As root, plain `launchctl list` shows the system domain, not the user's GUI session.
+        uid = home.stat().st_uid
+        cmd = ["launchctl", "print", f"gui/{uid}/com.apple.sysmond"] if is_admin() else ["launchctl", "list"]
+        rc, out = run(cmd)
+        if rc == 0 and "com.apple.sysmond" in out:
+            report(HIT, name, f"LaunchAgent com.apple.sysmond is loaded for uid {uid}")
+    if len(results) == hits_before:
+        report(OK, name, "no suspicious user LaunchAgents, com.apple.sysmond not loaded")
 
 
 def check_windows_tasks():
@@ -608,7 +631,7 @@ def main():
     check_authorized_keys(homes)
     check_dropped_files(homes)
     check_cron()
-    check_launchd()
+    check_launchd(homes)
     check_windows_tasks()
     check_processes()
     check_connections()
