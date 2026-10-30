@@ -19,11 +19,10 @@ https://phorion.io/blog/offical-claude-code-vsx-compromise/
   - sshd logs for logins with the attacker key or from localhost
 
 #### Usage:
-  - python3 vsx313.py               # current user
-  - sudo python3 vsx313.py          # all users + system logs (Linux/macOS)
-  - python3 vsx313.py --deep-logs   # also search macOS unified log (slow)
-  - py vsx313.py                    # Windows; from an Administrator prompt for all
-                                    # users, SYSTEM tasks and the OpenSSH event log
+  - `python3 vsx313.py               # current user`
+  - `sudo python3 vsx313.py          # all users + system logs (Linux/macOS)`
+  - `python3 vsx313.py --deep-logs   # also search macOS unified log (slow)`
+  - `py vsx313.py                    # Windows; from an Administrator prompt for all users`
 
 #### Screenshots:
 
