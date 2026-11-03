@@ -23,6 +23,10 @@ https://phorion.io/blog/offical-claude-code-vsx-compromise/
   - `sudo python3 vsx313.py          # all users + system logs (Linux/macOS)`
   - `python3 vsx313.py --deep-logs   # also search macOS unified log (slow)`
   - `py vsx313.py                    # Windows; from an Administrator prompt for all users`
+  - `python3 vsx313.py --no-windows-host  # WSL: skip the Windows host scan`
+
+#### WSL:
+When run inside WSL (kernel `*-microsoft-standard-WSL2`), the script scans the distro and then the Windows host. If Python is installed on Windows, it reruns itself with that Python through WSL interop, which runs the full Windows check set. Otherwise it falls back to file checks over `/mnt/c` plus `schtasks.exe`. The Windows side runs with your normal Windows token; start the WSL terminal as Administrator to cover all users and the OpenSSH event log.
 
 #### Screenshots:
 
