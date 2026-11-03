@@ -19,6 +19,10 @@ Usage:
   python3 vsx313.py --deep-logs   # also search macOS unified log (slow)
   py vsx313.py                    # Windows; from an Administrator prompt for all
                                   # users, SYSTEM tasks and the OpenSSH event log
+  python3 vsx313.py --no-windows-host  # under WSL, skip the Windows host scan
+
+Under WSL the Windows host is scanned too: the script reruns itself with Windows Python
+through WSL interop, or, if none is installed, checks the Windows files via /mnt/c.
 
 Exit code: 0 clean, 1 warnings only, 2 indicators found.
 """
@@ -163,8 +167,7 @@ def user_homes():
 
 # ---------------------------------------------------------------- checks
 
-def check_extensions(homes):
-    name = "extension"
+def check_extensions(homes, name="extension"):
     found_any = False
     roots = []
     for home in homes:
@@ -226,12 +229,13 @@ def check_npm():
         report(OK, name, f"global @anthropic-ai/claude-code install is not {BAD_VERSION}")
 
 
-def check_authorized_keys(homes):
-    name = "authorized_keys"
+def check_authorized_keys(homes, name="authorized_keys", programdata=None):
     files = [home / ".ssh" / f for home in homes for f in ("authorized_keys", "authorized_keys2")]
-    if SYSTEM == "Windows":
+    if programdata is None and SYSTEM == "Windows":
+        programdata = PROGRAMDATA
+    if programdata is not None:
         # Windows OpenSSH reads this instead of ~/.ssh/authorized_keys for admin accounts.
-        files.append(PROGRAMDATA / "ssh" / "administrators_authorized_keys")
+        files.append(programdata / "ssh" / "administrators_authorized_keys")
     for ak in files:
         text = read_text(ak)
         if text is None:
@@ -372,11 +376,8 @@ def check_launchd(homes):
         report(OK, name, "no suspicious user LaunchAgents, com.apple.sysmond not loaded")
 
 
-def check_windows_tasks():
-    if SYSTEM != "Windows":
-        return
-    name = "schtasks"
-    rc, out = run(["schtasks", "/query", "/tn", "SysMon", "/v", "/fo", "LIST"])
+def check_windows_tasks(exe="schtasks", name="schtasks"):
+    rc, out = run([exe, "/query", "/tn", "SysMon", "/v", "/fo", "LIST"])
     if rc is None:
         report(INFO, name, "schtasks not available")
     elif rc == 0:
@@ -610,6 +611,102 @@ def check_sshd():
             report(OK, name, "Windows OpenSSH Server service not installed")
 
 
+# ---------------------------------------------------------------- WSL
+
+def is_wsl():
+    """True inside WSL (kernel release looks like 5.15.x-microsoft-standard-WSL2)."""
+    return SYSTEM == "Linux" and ("microsoft" in platform.release().lower() or "WSL_DISTRO_NAME" in os.environ)
+
+
+def find_windows_python():
+    """A working Windows Python reachable through WSL interop, or None. The WindowsApps
+    python.exe Store alias exists even with no Python installed, so each candidate is run."""
+    candidates = ["py.exe", "python.exe", "python3.exe", "/mnt/c/Windows/py.exe"]
+    candidates += glob.glob("/mnt/c/Users/*/AppData/Local/Programs/Python/Launcher/py.exe")
+    candidates += sorted(glob.glob("/mnt/c/Users/*/AppData/Local/Programs/Python/Python3*/python.exe"), reverse=True)
+    for c in candidates:
+        rc, out = run([c, "-c", "import sys; print(sys.version_info[0])"], timeout=30)
+        if rc == 0 and out.strip() == "3":
+            return shutil.which(c)
+    return None
+
+
+def windows_homes_from_wsl():
+    users = Path("/mnt/c/Users")
+    skip = {"public", "default", "default user", "all users"}
+    homes = []
+    for p in sorted(users.glob("*")) if users.is_dir() else []:
+        try:
+            if p.is_dir() and not p.is_symlink() and p.name.lower() not in skip:
+                homes.append(p)
+        except OSError:
+            pass
+    return homes
+
+
+def scan_windows_files_from_wsl():
+    """Fallback when Windows has no Python: file checks over /mnt/c plus schtasks.exe."""
+    homes = windows_homes_from_wsl()
+    if not homes:
+        report(WARN, "win-host", "WSL detected but /mnt/c/Users is not readable; run vsx313.py on Windows")
+        return
+    report(WARN, "win-host", "no Windows Python found, so only files and scheduled tasks were checked; "
+           "install Python on Windows and run `py vsx313.py` for process, network and log checks")
+    print(f"Windows homes scanned: {', '.join(map(str, homes))}")
+    check_extensions(homes, name="win-extension")
+    check_authorized_keys(homes, name="win-authorized_keys", programdata=Path("/mnt/c/ProgramData"))
+
+    name = "win-files"
+    hits_before = len(results)
+    startup = Path("AppData/Roaming/Microsoft/Windows/Start Menu/Programs/Startup/sysmon.cmd")
+    paths = [str(Path("/mnt/c/ProgramData/Microsoft/Windows/Start Menu/Programs/Startup/sysmon.cmd"))]
+    for h in homes:
+        paths += glob.glob(str(h / "AppData/Local/Temp/.stk_*"))
+        paths += [str(h / ".config" / f) for f in (".smt", ".smtk", "smt.cmd", "smtk")]
+        paths.append(str(h / startup))
+    for path in sorted(set(paths)):
+        if os.path.exists(path):
+            fp = private_key_fingerprint(path)
+            detail = f" (key {fp}{', ATTACKER TUNNEL KEY' if fp in BAD_FPS else ''})" if fp else ""
+            report(HIT, name, f"{path}{detail}")
+    if len(results) == hits_before:
+        report(OK, name, "no dropped keys or scripts found")
+
+    if shutil.which("schtasks.exe"):
+        check_windows_tasks(exe="schtasks.exe", name="win-schtasks")
+
+
+def scan_windows_host(args):
+    """Scan the Windows side of a WSL machine. Returns an exit code (0/1/2)."""
+    print("\n" + "=" * 70 + "\nWSL detected: scanning the Windows host\n" + "=" * 70)
+    if not shutil.which("cmd.exe") and not os.path.isdir("/mnt/c"):
+        report(WARN, "win-host", "WSL interop and /mnt/c are unavailable; run vsx313.py on Windows")
+        return 1
+    py = find_windows_python()
+    win_script = None
+    if py:
+        rc, out = run(["wslpath", "-w", os.path.abspath(__file__)])
+        win_script = out.strip() if rc == 0 else None
+    if not (py and win_script):
+        before = len(results)
+        scan_windows_files_from_wsl()
+        new = results[before:]
+        return 2 if any(r[0] == HIT for r in new) else 1 if any(r[0] == WARN for r in new) else 0
+
+    print(f"Running {win_script} with Windows Python ({py})\n")
+    cmd = [py, win_script, "--no-color"] + (["--deep-logs"] if args.deep_logs else [])
+    try:
+        # Run from C:\ so cmd.exe shims (npm.cmd) don't complain about a \\wsl.localhost cwd.
+        rc = subprocess.run(cmd, cwd="/mnt/c" if os.path.isdir("/mnt/c") else None, timeout=1800).returncode
+    except (subprocess.TimeoutExpired, OSError) as e:
+        report(WARN, "win-host", f"Windows scan failed: {e}")
+        return 1
+    if rc not in (0, 1, 2):
+        report(WARN, "win-host", f"Windows scan exited with code {rc}")
+        return 1
+    return rc
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -617,6 +714,7 @@ def main():
     ap = argparse.ArgumentParser(description="Check for Claude Code VSX 2.1.313 compromise IOCs (read-only).")
     ap.add_argument("--deep-logs", action="store_true", help="search the macOS unified log (slow)")
     ap.add_argument("--no-color", action="store_true")
+    ap.add_argument("--no-windows-host", action="store_true", help="under WSL, do not scan the Windows host")
     args = ap.parse_args()
     use_color = use_color and not args.no_color
     if use_color and SYSTEM == "Windows":
@@ -632,7 +730,8 @@ def main():
     check_dropped_files(homes)
     check_cron()
     check_launchd(homes)
-    check_windows_tasks()
+    if SYSTEM == "Windows":
+        check_windows_tasks()
     check_processes()
     check_connections()
     check_sshd()
@@ -640,13 +739,26 @@ def main():
 
     hits = sum(1 for r in results if r[0] == HIT)
     warns = sum(1 for r in results if r[0] == WARN)
-    print(f"\nSummary: {hits} indicator(s), {warns} warning(s)")
+    label = "WSL summary" if is_wsl() and not args.no_windows_host else "Summary"
+    print(f"\n{label}: {hits} indicator(s), {warns} warning(s)")
+    code = 2 if hits else 1 if warns else 0
+
+    if is_wsl() and not args.no_windows_host:
+        before = len(results)
+        win_code = scan_windows_host(args)
+        new = results[before:]
+        if new:  # fallback scan or launch problems reported here rather than by a child summary
+            print(f"\nWindows host summary: {sum(r[0] == HIT for r in new)} indicator(s), "
+                  f"{sum(r[0] == WARN for r in new)} warning(s)")
+        code = max(code, win_code)
+        hits = sum(1 for r in results if r[0] == HIT) or (win_code == 2)
+        print(f"\nOverall (WSL + Windows host): {['clean', 'warnings only', 'INDICATORS FOUND'][code]}")
+
     if hits:
         print("Likely compromised. Uninstalling the extension does NOT remove the backdoor. See remediation:\n"
               "  https://phorion.io/blog/offical-claude-code-vsx-compromise/\n"
               "Rotate any credentials reachable by this user, especially *KEY*/*TOKEN*/*SECRET*/*PASS*/AWS/GCP env vars.")
-        return 2
-    return 1 if warns else 0
+    return code
 
 
 if __name__ == "__main__":
